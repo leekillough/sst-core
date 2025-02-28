@@ -1,107 +1,130 @@
 #!/bin/bash
 # This script will run clang-format on directories in sst-core to test/verify format
+# shellcheck enable=all
+# shellcheck disable=2312,2250
+
+set -o pipefail
 
 # Check for running in the root dir of SST-Core
-if [ ! -f ./scripts/clang-format-test.sh  ]; then
+if [[ ! -f ./scripts/clang-format-test.sh ]]; then
     echo "ERROR: This script must be run from the top level root directory of SST-Core..."
     exit 1
-fi
+fi >&2
 
-CLANG_FORMAT_EXE="clang-format"
-CLANG_FORMAT_ARG="--dry-run"
+usage() {
+    echo
+    echo "Usage: scripts/clang-format-test.sh [--format-exe <path_to_clang-format>]"
+    exit 1
+} >&2
 
-while :; do
-  case $1 in 
-    -h | --help)
-      echo "Run as scripts/clang-format-test.sh [--format-exe <path_to_clang-format>]"
-      exit
-      ;;
-    --format-exe)
-      if [ "$2" ]; then
-        CLANG_FORMAT_EXE=$2
-        shift 2
-      else
-        echo 'Error, --format-exe requires a path to a clang-format.'
-        exit
-      fi
-      ;;
-    -i)
-      CLANG_FORMAT_ARG="-i"
-      shift
-      ;;
-    * )
-      break
-  esac
-done
+parse_options() {
+    CLANG_FORMAT_EXE=clang-format
+    CLANG_FORMAT_ARG=(--dry-run)
 
-echo "Using clang-format ${CLANG_FORMAT_EXE} with arguments ${CLANG_FORMAT_ARG}."
+    while :; do
+        case $1 in
+            --format-exe)
+                if [[ -z "$2" ]]; then
+                    echo "Error: --format-exe requires a path to a clang-format command." >&2
+                    usage
+                fi
+                CLANG_FORMAT_EXE=$2
+                shift
+                ;;
+            -i)
+                CLANG_FORMAT_ARG+=("-i")
+                ;;
+            -*)
+                usage
+                ;;
+            *)
+                break
+        esac
+        shift
+    done
+}
 
-clang_format_version="$(${CLANG_FORMAT_EXE} --version)"
-currentver="$(${CLANG_FORMAT_EXE} --version | cut -d' ' -f3 | tr -dc '0-9')"
-if [ $currentver -lt 1200 ]; then
-  echo "clang-format version is $clang_format_version. We require version 12."
-  exit 1
-fi
+find_clang_format() {
+    if ! command -v "${CLANG_FORMAT_EXE}" >/dev/null; then
+        echo "Error: Cannot find ${CLANG_FORMAT_EXE} command" >&2
+        exit 1
+    fi
 
-if [ $currentver -ge 1300 ]; then
-  echo "clang-format version is $clang_format_version. We require version 12."
-  exit 1
-fi
+    CLANG_FORMAT_VERSION=$("${CLANG_FORMAT_EXE}" --version | sed -E 's/^[^0-9]*([0-9]+).*/\1/')
+    if [[ ${CLANG_FORMAT_VERSION} != 12 ]]; then
+        echo "clang-format version is ${CLANG_FORMAT_VERSION}. We require version 12."
+        exit 1
+    fi
 
+    echo "Using ${CLANG_FORMAT_EXE} with arguments ${CLANG_FORMAT_ARG[*]}."
+}
 
-# Setup SST-Core Directories to be skipped for clang-format checks
-DIRS_TO_SKIP="-path ./build "
-DIRS_TO_SKIP="$DIRS_TO_SKIP -or -path ./src/sst/core/libltdl"
-DIRS_TO_SKIP="$DIRS_TO_SKIP -or -path ./external"
-# Add additional directories to skip here...
+setup_dirs_to_skip() {
+    # Setup SST-Core Directories to be skipped for clang-format checks
+    DIRS_TO_SKIP=(./build)
+    DIRS_TO_SKIP+=(./src/sst/core/libltdl)
+    DIRS_TO_SKIP+=(./external)
+    # Add additional directories to skip here...
 
-echo "======================================="
-echo "=== PERFORMING CLANG-FORMAT TESTING ==="
-echo "======================================="
+    # Setup find command argument for directories to be skipped
+    FIND_DIRS_TO_SKIP=("(")
+    local DELIM=()
+    for dir in "${DIRS_TO_SKIP[@]}"; do
+        FIND_DIRS_TO_SKIP+=("${DELIM[@]}" -path "${dir}")
+        DELIM=("-o")
+    done
+    FIND_DIRS_TO_SKIP+=(")")
+}
 
-# Run clang-format on all specific .h files
-echo
-find . -type d \( $DIRS_TO_SKIP \) -prune -false -o -name '*.h' -exec ${CLANG_FORMAT_EXE} ${CLANG_FORMAT_ARG} {} \;  > clang_format_results_h.txt 2>&1
-rtncode=$?
-echo "=== CLANG-FORMAT FINISHED *.h CHECKS WITH RTN CODE $rtncode"
+clang_format_testing() {
+    local ext=$1
+    echo
+    find . -type d "${FIND_DIRS_TO_SKIP[@]}" -prune -false -o -name "*.${ext}" -exec "${CLANG_FORMAT_EXE}" "${CLANG_FORMAT_ARG[@]}" {} \; > "clang_format_results_${ext}.txt" 2>&1
+    echo "=== CLANG-FORMAT FINISHED *.${ext} CHECKS WITH RTN CODE $?"
+}
 
-# Run clang-format on all specific .cc files
-echo
-find . -type d \( $DIRS_TO_SKIP \) -prune -false -o -name '*.cc' -exec ${CLANG_FORMAT_EXE} ${CLANG_FORMAT_ARG} {} \; > clang_format_results_cc.txt 2>&1
-rtncode=$?
-echo "=== CLANG-FORMAT FINISHED *.cc CHECKS WITH RTN CODE $rtncode"
+evaluate_clang_format_testing() {
+    local ext=$1
+    echo
+    if [[ -s "./clang_format_results_${ext}.txt" ]]; then
+        echo "=== CLANG FORMAT RESULT FILE FOR .${ext} FILES IS NOT EMPTY - FAILURE"
+        cat "./clang_format_results_${ext}.txt"
+        FINAL_TEST_RESULT=1
+    else
+        echo "=== CLANG FORMAT RESULT FILE FOR .${ext} FILES IS EMPTY - SUCCESS"
+    fi
+}
 
-# Set a test result return to a default rtn
-export FINAL_TEST_RESULT=0
+run_tests() {
+    cat<<EOF
+=======================================
+=== PERFORMING CLANG-FORMAT TESTING ===
+=======================================
+EOF
+    FINAL_TEST_RESULT=0
 
-# Evaluate the Results
-echo
-if [ -s ./clang_format_results_h.txt ]; then
-  echo "=== CLANG FORMAT RESULT FILE FOR .h FILES IS IS NOT EMPTY - FAILURE"
-  cat ./clang_format_results_h.txt
-  export FINAL_TEST_RESULT=1
-else
-  echo "=== CLANG FORMAT RESULT FILE FOR .h FILES IS EMPTY - SUCCESS"
-fi
+    # Run clang-format on all .h and .cc files
+    clang_format_testing h
+    clang_format_testing cc
 
-echo
-if [ -s ./clang_format_results_cc.txt ]; then
-  echo "=== CLANG FORMAT RESULT FILE FOR .cc FILES IS IS NOT EMPTY - FAILURE"
-  cat ./clang_format_results_cc.txt
-  export FINAL_TEST_RESULT=1
-else
-  echo "=== CLANG FORMAT RESULT FILE FOR .cc FILES IS EMPTY - SUCCESS"
-fi
+    # Evaluate the Results
+    evaluate_clang_format_testing h
+    evaluate_clang_format_testing cc
 
-# Display the final results
-echo
-echo "========================================"
-if [ $FINAL_TEST_RESULT == 0 ]; then
-echo "=== FINAL TEST RESULT = ($FINAL_TEST_RESULT) - PASSED ==="
-else
-echo "=== FINAL TEST RESULT = ($FINAL_TEST_RESULT) - FAILED ==="
-fi
-echo "========================================"
-echo
+    # Display the final results
+    cat<<EOF
 
-exit $FINAL_TEST_RESULT
+========================================
+=== FINAL TEST RESULT = (${FINAL_TEST_RESULT}) - $([[ ${FINAL_TEST_RESULT} -eq 0 ]] && echo PASSED || echo FAILED) ===
+========================================
+
+EOF
+    return "${FINAL_TEST_RESULT}"
+}
+
+# Main program
+
+parse_options "$@"
+find_clang_format
+setup_dirs_to_skip
+run_tests
